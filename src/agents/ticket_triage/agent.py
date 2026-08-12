@@ -13,6 +13,15 @@ class TicketTriageAgent:
         title = payload["title"]
         description = payload["description"]
 
+        # Controlled failure for Day 65 DLQ testing.
+        # This allows us to simulate an event that
+        # consistently fails processing.
+        if ticket_id == "FAIL-001":
+            raise RuntimeError(
+                "Simulated ticket processing failure"
+            )
+
+        # Normal ticket processing
         result = self.classifier.classify(
             title=title,
             description=description,

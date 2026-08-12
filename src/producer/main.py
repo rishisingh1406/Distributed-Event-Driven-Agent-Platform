@@ -70,6 +70,12 @@ tickets = [
         "Customer was charged incorrectly",
     ),
     create_ticket(
+    "FAIL-001",
+    "Simulated failure",
+    "This ticket is intentionally designed to fail processing",
+),
+
+    create_ticket(
         "T-1006",
         "Email not received",
         "Customer did not receive verification email",
