@@ -2,6 +2,8 @@ from confluent_kafka import Consumer, Producer
 import json
 
 from src.agents.ticket_triage.agent import TicketTriageAgent
+from src.common.logging_config import setup_logger
+from src.database.ticket_store import TicketStore
 
 
 # ============================================================
@@ -19,6 +21,15 @@ MAX_RETRIES = 3
 
 
 # ============================================================
+# Structured logger
+# ============================================================
+
+logger = setup_logger(
+    "ticket-triage-consumer"
+)
+
+
+# ============================================================
 # Kafka / Redpanda consumer
 # ============================================================
 
@@ -27,8 +38,8 @@ consumer = Consumer({
     "group.id": GROUP_ID,
     "auto.offset.reset": "earliest",
 
-    # We manually commit offsets.
-    # This is important for retry + DLQ handling.
+    # Manual offset commits.
+    # Important for retry + DLQ handling.
     "enable.auto.commit": False,
 })
 
@@ -45,10 +56,18 @@ producer = Producer({
 
 # ============================================================
 # Ticket Triage Agent
-# Business logic remains outside the consumer.
 # ============================================================
 
 agent = TicketTriageAgent()
+
+
+# ============================================================
+# PostgreSQL Ticket Store
+# ============================================================
+
+ticket_store = TicketStore()
+
+ticket_store.initialize()
 
 
 # ============================================================
@@ -58,29 +77,41 @@ agent = TicketTriageAgent()
 consumer.subscribe([INPUT_TOPIC])
 
 
-print(
-    "Ticket Triage Agent started...",
-    flush=True,
+logger.info(
+    "Ticket Triage Agent started",
+    extra={
+        "service": "ticket-triage-consumer",
+        "event": "consumer_started",
+    },
 )
 
-print(
-    f"Listening to topic: {INPUT_TOPIC}",
-    flush=True,
+
+logger.info(
+    "Listening to topic",
+    extra={
+        "service": "ticket-triage-consumer",
+        "event": "consumer_subscribed",
+    },
 )
 
-print(
-    f"Consumer group: {GROUP_ID}",
-    flush=True,
+
+logger.info(
+    f"Consumer configuration: group={GROUP_ID}, "
+    f"max_retries={MAX_RETRIES}, "
+    f"dlq_topic={DLQ_TOPIC}",
+    extra={
+        "service": "ticket-triage-consumer",
+        "event": "consumer_configuration",
+    },
 )
 
-print(
-    f"Maximum retries: {MAX_RETRIES}",
-    flush=True,
-)
 
-print(
-    f"DLQ topic: {DLQ_TOPIC}",
-    flush=True,
+logger.info(
+    "PostgreSQL ticket store initialized",
+    extra={
+        "service": "ticket-triage-consumer",
+        "event": "database_initialized",
+    },
 )
 
 
@@ -108,9 +139,12 @@ try:
 
         if message.error():
 
-            print(
-                f"Consumer error: {message.error()}",
-                flush=True,
+            logger.error(
+                "Consumer error",
+                extra={
+                    "service": "ticket-triage-consumer",
+                    "event": "consumer_error",
+                },
             )
 
             continue
@@ -128,13 +162,17 @@ try:
 
         except json.JSONDecodeError as error:
 
-            print(
+            logger.error(
                 f"Invalid JSON event: {error}",
-                flush=True,
+                extra={
+                    "service": "ticket-triage-consumer",
+                    "event": "invalid_json",
+                },
             )
 
             # Invalid messages cannot be processed.
-            # Commit so the consumer does not get stuck forever.
+            # Commit so consumer does not get stuck forever.
+
             consumer.commit(
                 message=message,
                 asynchronous=False,
@@ -143,36 +181,64 @@ try:
             continue
 
 
-        # ----------------------------------------------------
-        # Display event metadata
-        # ----------------------------------------------------
+        # ====================================================
+        # Extract event metadata
+        # ====================================================
 
-        print(
-            "\nEvent received:",
-            flush=True,
+        metadata = event.get(
+            "metadata",
+            {},
         )
 
-        print(
-            json.dumps(
-                event,
-                indent=2,
-            ),
-            flush=True,
+        event_id = metadata.get(
+            "event_id"
         )
 
-        print(
-            f"Topic: {message.topic()}",
-            flush=True,
+        correlation_id = metadata.get(
+            "correlation_id"
         )
 
-        print(
-            f"Partition: {message.partition()}",
-            flush=True,
+        event_type = metadata.get(
+            "event_type"
         )
 
-        print(
-            f"Offset: {message.offset()}",
-            flush=True,
+        payload = event.get(
+            "payload",
+            {},
+        )
+
+        ticket_id = payload.get(
+            "ticket_id"
+        )
+
+
+        # ====================================================
+        # Event received
+        # ====================================================
+
+        logger.info(
+            "Event received",
+            extra={
+                "service": "ticket-triage-consumer",
+                "event": "event_received",
+                "event_id": event_id,
+                "correlation_id": correlation_id,
+            },
+        )
+
+
+        # ====================================================
+        # Event location
+        # ====================================================
+
+        logger.info(
+            "Event location",
+            extra={
+                "service": "ticket-triage-consumer",
+                "event": "event_location",
+                "event_id": event_id,
+                "correlation_id": correlation_id,
+            },
         )
 
 
@@ -182,12 +248,20 @@ try:
 
         processing_successful = False
 
-        for attempt in range(1, MAX_RETRIES + 1):
+        for attempt in range(
+            1,
+            MAX_RETRIES + 1
+        ):
 
-            print(
-                f"\nProcessing ticket "
-                f"(attempt {attempt}/{MAX_RETRIES})...",
-                flush=True,
+            logger.info(
+                f"Processing ticket "
+                f"(attempt {attempt}/{MAX_RETRIES})",
+                extra={
+                    "service": "ticket-triage-consumer",
+                    "event": "processing_started",
+                    "event_id": event_id,
+                    "correlation_id": correlation_id,
+                },
             )
 
             try:
@@ -196,36 +270,59 @@ try:
                 # Business logic
                 # ------------------------------------------------
 
-                triage_result = agent.process(event)
+                triage_result = agent.process(
+                    event
+                )
 
 
                 # ------------------------------------------------
                 # Processing succeeded
                 # ------------------------------------------------
 
-                print(
-                    "\nTriage result:",
-                    flush=True,
-                )
-
-                print(
-                    json.dumps(
-                        triage_result,
-                        indent=2,
-                    ),
-                    flush=True,
-                )
-
-                print(
-                    f"\nTicket "
-                    f"{triage_result['ticket_id']} "
-                    f"successfully triaged.",
-                    flush=True,
+                logger.info(
+                    "Ticket triage completed",
+                    extra={
+                        "service": "ticket-triage-consumer",
+                        "event": "processing_completed",
+                        "event_id": event_id,
+                        "correlation_id": correlation_id,
+                    },
                 )
 
 
                 # ------------------------------------------------
-                # Commit offset ONLY after successful processing
+                # Save processing result to PostgreSQL
+                #
+                # IMPORTANT:
+                # Database persistence happens BEFORE the
+                # Redpanda offset is committed.
+                # ------------------------------------------------
+
+                ticket_store.save_ticket_result(
+                    event_id=event_id,
+                    correlation_id=correlation_id,
+                    ticket_id=ticket_id,
+                    status="completed",
+                    triage_result=triage_result,
+                )
+
+
+                logger.info(
+                    "Ticket result persisted to PostgreSQL",
+                    extra={
+                        "service": "ticket-triage-consumer",
+                        "event": "database_write_completed",
+                        "event_id": event_id,
+                        "correlation_id": correlation_id,
+                    },
+                )
+
+
+                # ------------------------------------------------
+                # Commit offset ONLY after:
+                #
+                # 1. Agent processing succeeded
+                # 2. PostgreSQL persistence succeeded
                 # ------------------------------------------------
 
                 consumer.commit(
@@ -233,10 +330,17 @@ try:
                     asynchronous=False,
                 )
 
-                print(
-                    "Kafka offset committed.",
-                    flush=True,
+
+                logger.info(
+                    "Kafka offset committed",
+                    extra={
+                        "service": "ticket-triage-consumer",
+                        "event": "offset_committed",
+                        "event_id": event_id,
+                        "correlation_id": correlation_id,
+                    },
                 )
+
 
                 processing_successful = True
 
@@ -245,23 +349,33 @@ try:
 
             except Exception as error:
 
-                print(
-                    f"\nProcessing failed "
-                    f"on attempt {attempt}: {error}",
-                    flush=True,
+                logger.error(
+                    f"Processing failed on attempt "
+                    f"{attempt}: {error}",
+                    extra={
+                        "service": "ticket-triage-consumer",
+                        "event": "processing_failed",
+                        "event_id": event_id,
+                        "correlation_id": correlation_id,
+                    },
                 )
 
 
                 # ------------------------------------------------
-                # If retries remain, try again.
+                # Retry
                 # ------------------------------------------------
 
                 if attempt < MAX_RETRIES:
 
-                    print(
-                        f"Retrying ticket... "
-                        f"({attempt + 1}/{MAX_RETRIES})",
-                        flush=True,
+                    logger.warning(
+                        f"Retrying ticket "
+                        f"(next attempt: {attempt + 1})",
+                        extra={
+                            "service": "ticket-triage-consumer",
+                            "event": "processing_retry",
+                            "event_id": event_id,
+                            "correlation_id": correlation_id,
+                        },
                     )
 
                     continue
@@ -271,19 +385,19 @@ try:
                 # All retries exhausted
                 # =================================================
 
-                print(
-                    "\nMaximum retries reached.",
-                    flush=True,
-                )
-
-                print(
-                    "Sending event to Dead Letter Queue...",
-                    flush=True,
+                logger.error(
+                    "Maximum retries reached",
+                    extra={
+                        "service": "ticket-triage-consumer",
+                        "event": "max_retries_reached",
+                        "event_id": event_id,
+                        "correlation_id": correlation_id,
+                    },
                 )
 
 
                 # ------------------------------------------------
-                # Add failure metadata
+                # Create DLQ event
                 # ------------------------------------------------
 
                 dlq_event = {
@@ -305,6 +419,17 @@ try:
 
                 try:
 
+                    logger.warning(
+                        "Publishing event to DLQ",
+                        extra={
+                            "service": "ticket-triage-consumer",
+                            "event": "dlq_publish_started",
+                            "event_id": event_id,
+                            "correlation_id": correlation_id,
+                        },
+                    )
+
+
                     producer.produce(
                         DLQ_TOPIC,
                         value=json.dumps(
@@ -312,23 +437,21 @@ try:
                         ).encode("utf-8"),
                     )
 
-                    # Make sure the message is actually delivered
+
+                    # Make sure the DLQ message is delivered
                     # before committing the original event.
+
                     producer.flush()
 
 
-                    print(
-                        "\nEvent successfully published "
-                        "to DLQ.",
-                        flush=True,
-                    )
-
-                    print(
-                        json.dumps(
-                            dlq_event,
-                            indent=2,
-                        ),
-                        flush=True,
+                    logger.error(
+                        "Event successfully published to DLQ",
+                        extra={
+                            "service": "ticket-triage-consumer",
+                            "event": "dlq_publish_completed",
+                            "event_id": event_id,
+                            "correlation_id": correlation_id,
+                        },
                     )
 
 
@@ -341,31 +464,43 @@ try:
                         asynchronous=False,
                     )
 
-                    print(
-                        "\nOriginal event offset committed "
-                        "after DLQ publication.",
-                        flush=True,
+
+                    logger.info(
+                        "Original event offset committed after DLQ",
+                        extra={
+                            "service": "ticket-triage-consumer",
+                            "event": "dlq_offset_committed",
+                            "event_id": event_id,
+                            "correlation_id": correlation_id,
+                        },
                     )
+
 
                     processing_successful = True
 
 
                 except Exception as dlq_error:
 
-                    print(
-                        "\nCRITICAL: Failed to publish "
-                        "event to DLQ.",
-                        flush=True,
+                    logger.critical(
+                        f"Failed to publish event to DLQ: "
+                        f"{dlq_error}",
+                        extra={
+                            "service": "ticket-triage-consumer",
+                            "event": "dlq_publish_failed",
+                            "event_id": event_id,
+                            "correlation_id": correlation_id,
+                        },
                     )
 
-                    print(
-                        f"DLQ error: {dlq_error}",
-                        flush=True,
-                    )
 
-                    print(
-                        "Offset will NOT be committed.",
-                        flush=True,
+                    logger.error(
+                        "Offset will NOT be committed",
+                        extra={
+                            "service": "ticket-triage-consumer",
+                            "event": "offset_not_committed",
+                            "event_id": event_id,
+                            "correlation_id": correlation_id,
+                        },
                     )
 
 
@@ -375,25 +510,37 @@ try:
 
         if processing_successful:
 
-            print(
-                "\nEvent processing completed.",
-                flush=True,
+            logger.info(
+                "Event processing completed",
+                extra={
+                    "service": "ticket-triage-consumer",
+                    "event": "event_completed",
+                    "event_id": event_id,
+                    "correlation_id": correlation_id,
+                },
             )
 
         else:
 
-            print(
-                "\nEvent processing failed. "
-                "Message remains uncommitted.",
-                flush=True,
+            logger.error(
+                "Event processing failed and remains uncommitted",
+                extra={
+                    "service": "ticket-triage-consumer",
+                    "event": "event_failed",
+                    "event_id": event_id,
+                    "correlation_id": correlation_id,
+                },
             )
 
 
 except KeyboardInterrupt:
 
-    print(
-        "\nStopping Ticket Triage Agent...",
-        flush=True,
+    logger.info(
+        "Stopping Ticket Triage Agent",
+        extra={
+            "service": "ticket-triage-consumer",
+            "event": "consumer_stopping",
+        },
     )
 
 
@@ -401,7 +548,10 @@ finally:
 
     consumer.close()
 
-    print(
-        "Consumer closed.",
-        flush=True,
+    logger.info(
+        "Consumer closed",
+        extra={
+            "service": "ticket-triage-consumer",
+            "event": "consumer_closed",
+        },
     )

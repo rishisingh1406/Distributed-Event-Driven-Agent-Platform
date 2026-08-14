@@ -1,3 +1,5 @@
 confluent-kafka
 python-dotenv
 pydantic
+fastapi
+uvicorn
