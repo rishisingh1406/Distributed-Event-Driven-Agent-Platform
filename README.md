@@ -833,12 +833,6 @@ Building around these failure modes changed the project from a basic Kafka exper
 
 ---
 
-## Resume Version
-
-> Built a Kafka-based event-driven multi-agent platform with checkpointed, resumable long-running agents, dead-letter handling, horizontal consumer scaling, structured observability, and a Streamlit monitoring dashboard; load-tested with a 500-event burst.
-
----
-
 ## Project Goal
 
 The goal of this project was to move from:
